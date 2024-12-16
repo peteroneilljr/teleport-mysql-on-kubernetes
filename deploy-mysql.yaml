@@ -1,0 +1,96 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: initdb
+data:
+  initdb.sql: |-
+    CREATE DATABASE teleport_db;
+    CREATE USER 'developer'@'%' REQUIRE SUBJECT '/CN=developer';
+    GRANT ALL ON `%`.* TO 'developer'@'%';
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      initContainers:
+        - name: copy-certs
+          image: mysql:latest
+          # certificates need to be owened by the mysql user with permissions 0600
+          command: ['sh', '-c', 'cp /certs/* /certs-writable/ && chown -R mysql:mysql /certs-writable && chmod 0600 /certs-writable/* && ls -ahl /certs-writable']
+          volumeMounts:
+            - name: certs
+              mountPath: /certs
+            - name: certs-writable
+              mountPath: /certs-writable
+      containers:
+        - name: mysql
+          command: ["docker-entrypoint.sh"]
+          args: [
+            "--ssl-ca=/etc/mysql/certs/ca.crt", 
+            "--ssl-cert=/etc/mysql/certs/mysql.crt",
+            "--ssl-key=/etc/mysql/certs/mysql.key",
+            "--bind-address=0.0.0.0"
+          ]
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
+            requests:
+              cpu: 500m
+              memory: 256Mi
+          image: mysql:latest
+          ports:
+            - containerPort: 3306
+          envFrom:
+            - secretRef:
+                name: mysql-vars
+          volumeMounts:
+            - name: certs-writable
+              mountPath: /etc/mysql/certs/mysql.crt
+              subPath: mysql-teleport.crt
+              readOnly: true
+            - name: certs-writable
+              mountPath: /etc/mysql/certs/mysql.key
+              subPath: mysql-teleport.key
+              readOnly: true
+            - name: certs-writable
+              mountPath: /etc/mysql/certs/ca.crt
+              subPath: mysql-teleport.cas
+              readOnly: true
+            - name: datadir
+              mountPath: /var/lib/mysql
+            - name: mysql-initdb
+              mountPath: /docker-entrypoint-initdb.d
+      volumes:
+        - name: certs
+          secret:
+            secretName: mysql-certs
+        - name: certs-writable
+          emptyDir: {}
+        - name: datadir
+          emptyDir: {}
+        - name: mysql-initdb
+          configMap:
+            name: initdb
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+spec:
+  selector:
+    app: mysql
+  ports:
+    - protocol: TCP
+      port: 3306
+      targetPort: 3306
